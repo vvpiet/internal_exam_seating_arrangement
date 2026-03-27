@@ -243,11 +243,13 @@ else:
 try:
     from docx import Document
     from docx.shared import Inches
+    HAS_DOCX = True
 except ImportError:
-    Document = None
+    HAS_DOCX = False
 
 try:
     from fpdf import FPDF
+    HAS_FPDF = True
 
     class CustomPDF(FPDF):
         def header(self):
@@ -266,99 +268,105 @@ try:
             self.cell(0, 10, f'Page {self.page_no()}', align='C')
 
 except ImportError:
-    FPDF = None
+    HAS_FPDF = False
 
-if Document is not None:
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.shared import Pt, RGBColor
-    
-    doc_bytes = io.BytesIO()
-    doc = Document()
+if HAS_DOCX:
+    try:
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.shared import Pt, RGBColor
+        
+        doc_bytes = io.BytesIO()
+        doc = Document()
 
-    # Set header for all pages
-    section = doc.sections[0]
-    header = section.header
-    header_para = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
-    header_para.text = 'VVP Institute of Engineering and Technology, Solapur'
-    header_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = header_para.runs[0]
-    run.font.size = Pt(14)
-    run.font.bold = True
-    run.font.color.rgb = RGBColor(0, 51, 102)
+        # Set header for all pages
+        section = doc.sections[0]
+        header = section.header
+        header_para = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+        header_para.text = 'VVP Institute of Engineering and Technology, Solapur'
+        header_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = header_para.runs[0]
+        run.font.size = Pt(14)
+        run.font.bold = True
+        run.font.color.rgb = RGBColor(0, 51, 102)
 
-    # Document title
-    title = doc.add_heading('Internal Exam Seating Arrangement', level=1)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
-    doc.add_paragraph()
-    doc.add_paragraph()
-    
-    for classroom_name, group_df in classroom_groups:
-        doc.add_heading(f'Classroom: {classroom_name}', level=2)
-        table = doc.add_table(rows=1, cols=7)
-        hdr_cells = table.rows[0].cells
-        headers = ["Bench", "Student 1", "Branch 1", "Class 1", "Student 2", "Branch 2", "Class 2"]
-        for i, h in enumerate(headers):
-            hdr_cells[i].text = h
+        # Document title
+        title = doc.add_heading('Internal Exam Seating Arrangement', level=1)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
-        # Set row height for header
-        table.rows[0].height = Inches(0.4)
+        doc.add_paragraph()
+        doc.add_paragraph()
         
-        for _, row in group_df.iterrows():
-            cells = table.add_row().cells
-            cells[0].text = str(row.Bench)
-            cells[1].text = str(row.Student1)
-            cells[2].text = str(row.Branch1)
-            cells[3].text = str(row.Class1)
-            cells[4].text = str(row.Student2)
-            cells[5].text = str(row.Branch2)
-            cells[6].text = str(row.Class2)
-            # Set row height for data rows
-            table.rows[-1].height = Inches(0.4)
+        classroom_groups_word = seating_df.groupby("Classroom")
+        for classroom_name, group_df in classroom_groups_word:
+            doc.add_heading(f'Classroom: {classroom_name}', level=2)
+            table = doc.add_table(rows=1, cols=7)
+            hdr_cells = table.rows[0].cells
+            headers = ["Bench", "Student 1", "Branch 1", "Class 1", "Student 2", "Branch 2", "Class 2"]
+            for i, h in enumerate(headers):
+                hdr_cells[i].text = h
+            
+            # Set row height for header
+            table.rows[0].height = Inches(0.4)
+            
+            for _, row in group_df.iterrows():
+                cells = table.add_row().cells
+                cells[0].text = str(row.Bench)
+                cells[1].text = str(row.Student1)
+                cells[2].text = str(row.Branch1)
+                cells[3].text = str(row.Class1)
+                cells[4].text = str(row.Student2)
+                cells[5].text = str(row.Branch2)
+                cells[6].text = str(row.Class2)
+                # Set row height for data rows
+                table.rows[-1].height = Inches(0.4)
+            
+            doc.add_paragraph("")  # Add space between classrooms
         
-        doc.add_paragraph("")  # Add space between classrooms
-    
-    doc.save(doc_bytes)
-    doc_bytes.seek(0)
-    st.download_button("Download arrangement as Word (.docx)", data=doc_bytes, file_name="seating_arrangement.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        doc.save(doc_bytes)
+        doc_bytes.seek(0)
+        st.download_button("⬇️ Download arrangement as Word (.docx)", data=doc_bytes, file_name="seating_arrangement.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    except Exception as e:
+        st.error(f"Error generating Word document: {e}")
 else:
-    st.info("Install 'python-docx' to enable Word download.")
+    st.warning("⚠️ Word download unavailable. Install: `pip install python-docx`")
 
 if FPDF is not None:
-    pdf_buffer = io.BytesIO()
-    pdf = CustomPDF(orientation='P', unit='mm', format='A4')
-    pdf.set_auto_page_break(auto=True, margin=20)
-    pdf.add_page()
+    try:
+        pdf = CustomPDF(orientation='P', unit='mm', format='A4')
+        pdf.set_auto_page_break(auto=True, margin=20)
+        pdf.add_page()
 
-    for classroom_name, group_df in classroom_groups:
-        pdf.set_font('Arial', 'B', 12)
-        pdf.cell(0, 8, f'Classroom: {classroom_name}', ln=True)
-        pdf.ln(2)
-        
-        pdf.set_font('Arial', 'B', 10)
-        col_widths = [10, 30, 20, 15, 30, 20, 15]
-        headers = ["Bench", "Student1", "Branch1", "Class1", "Student2", "Branch2", "Class2"]
-        for i, header in enumerate(headers):
-            pdf.cell(col_widths[i], 10, header, border=1)  # Increased height for header
-        pdf.ln()
-        
-        pdf.set_font('Arial', '', 10)
-        for _, row in group_df.iterrows():
-            pdf.cell(col_widths[0], 10, str(row.Bench), border=1)  # Increased height for data
-            pdf.cell(col_widths[1], 10, str(row.Student1), border=1)
-            pdf.cell(col_widths[2], 10, str(row.Branch1), border=1)
-            pdf.cell(col_widths[3], 10, str(row.Class1), border=1)
-            pdf.cell(col_widths[4], 10, str(row.Student2), border=1)
-            pdf.cell(col_widths[5], 10, str(row.Branch2), border=1)
-            pdf.cell(col_widths[6], 10, str(row.Class2), border=1)
+        classroom_groups_pdf = seating_df.groupby("Classroom")
+        for classroom_name, group_df in classroom_groups_pdf:
+            pdf.set_font('Arial', 'B', 12)
+            pdf.cell(0, 8, f'Classroom: {classroom_name}', ln=True)
+            pdf.ln(2)
+            
+            pdf.set_font('Arial', 'B', 10)
+            col_widths = [10, 30, 20, 15, 30, 20, 15]
+            headers = ["Bench", "Student1", "Branch1", "Class1", "Student2", "Branch2", "Class2"]
+            for i, header in enumerate(headers):
+                pdf.cell(col_widths[i], 10, header, border=1)
             pdf.ln()
+            
+            pdf.set_font('Arial', '', 9)
+            for _, row in group_df.iterrows():
+                pdf.cell(col_widths[0], 10, str(row.Bench), border=1)
+                pdf.cell(col_widths[1], 10, str(row.Student1), border=1)
+                pdf.cell(col_widths[2], 10, str(row.Branch1), border=1)
+                pdf.cell(col_widths[3], 10, str(row.Class1), border=1)
+                pdf.cell(col_widths[4], 10, str(row.Student2), border=1)
+                pdf.cell(col_widths[5], 10, str(row.Branch2), border=1)
+                pdf.cell(col_widths[6], 10, str(row.Class2), border=1)
+                pdf.ln()
+            
+            pdf.ln(5)
         
-        pdf.ln(5)  # Space between classrooms
-    
-    # FPDF.output expects filename or returns bytes with dest='S'
-    pdf_bytes = pdf.output(dest='S').encode('latin-1')
-    st.download_button("Download arrangement as PDF", data=pdf_bytes, file_name="seating_arrangement.pdf", mime="application/pdf")
+        pdf_bytes = pdf.output()
+        st.download_button("⬇️ Download arrangement as PDF", data=pdf_bytes, file_name="seating_arrangement.pdf", mime="application/pdf")
+    except Exception as e:
+        st.error(f"Error generating PDF: {e}")
 else:
-    st.info("Install 'fpdf' to enable PDF download.")
+    st.warning("Install 'fpdf2' to enable PDF download: pip install fpdf2")
 
 st.success("Seating generation complete!")
