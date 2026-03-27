@@ -15,7 +15,7 @@ st.markdown("<p style='text-align: center; color: #555; font-weight: bold;'>Prep
 st.sidebar.header("1. Upload and settings")
 uploaded_file = st.sidebar.file_uploader("Upload student CSV", type=["csv"])
 
-st.sidebar.markdown("Expected CSV columns: `StudentID`, `Name`, `Class` (FY, SY, TY, B.Tech)")
+st.sidebar.markdown("Expected CSV columns: `StudentID`, `Name`, `Class` (FY, SY, TY, B.Tech), `Branch`")
 
 st.sidebar.subheader("2. Classroom configuration")
 num_classrooms = st.sidebar.number_input("Number of classrooms", min_value=1, value=4, step=1)
@@ -41,17 +41,21 @@ if uploaded_file is None:
 
 try:
     df = pd.read_csv(uploaded_file)
+    df.columns = df.columns.str.strip()  # Strip whitespace from column names
 except Exception as e:
     st.error(f"Failed to read CSV: {e}")
     st.stop()
 
-required_cols = {"StudentID", "Name", "Class"}
+required_cols = {"StudentID", "Name", "Class", "Branch"}
 if not required_cols.issubset(df.columns):
     st.error(f"CSV required columns: {required_cols}. Found: {set(df.columns)}")
     st.stop()
 
 # Normalize class labels
 df["Class"] = df["Class"].astype(str).str.strip().str.upper().replace({"BTECH": "B.TECH", "B TECH": "B.TECH", "B.TECH": "B.TECH"})
+
+# Normalize branch labels
+df["Branch"] = df["Branch"].astype(str).str.strip().str.upper()
 
 valid_class_map = {
     "FY": "FY",
@@ -80,20 +84,25 @@ order_map = {"FY": 0, "SY": 1, "TY": 2, "B.Tech": 3}
 df["ClassOrder"] = df["ClassGroup"].map(order_map)
 
 # Sort input as asked
-sorted_df = df.sort_values(["ClassOrder", "Name", "StudentID"]).reset_index(drop=True)
+sorted_df = df.sort_values(["Branch", "ClassOrder", "StudentID"]).reset_index(drop=True)
 
-st.subheader("Student list (sorted by class and name)")
-st.dataframe(sorted_df[["StudentID", "Name", "ClassGroup"]])
+st.subheader("Student list (sorted by branch, class and student ID)")
+st.dataframe(sorted_df[["StudentID", "Name", "Branch", "ClassGroup"]])
 
-# Build academic class pools (FY, SY, TY, B.Tech)
+# Add branch-roll display
+sorted_df["Branch-Roll"] = sorted_df["Branch"] + " " + sorted_df["ClassGroup"] + "-" + sorted_df["StudentID"].astype(str)
+st.dataframe(sorted_df[["Branch-Roll", "Name"]])
+
+# Build academic class pools (FY, SY, TY, B.Tech) with branches
 prioritized_classes = ["FY", "SY", "TY", "B.Tech"]
 all_classes = sorted_df["ClassGroup"].unique().tolist()
 ordered_classes = [c for c in prioritized_classes if c in all_classes] + [c for c in all_classes if c not in prioritized_classes]
 
-class_pools = {
-    cl: sorted_df[sorted_df["ClassGroup"] == cl].to_dict(orient="records")
-    for cl in ordered_classes
-}
+class_pools = {}
+for cl in ordered_classes:
+    class_pools[cl] = {}
+    for branch in sorted_df[sorted_df["ClassGroup"] == cl]["Branch"].unique():
+        class_pools[cl][branch] = sorted_df[(sorted_df["ClassGroup"] == cl) & (sorted_df["Branch"] == branch)].to_dict(orient="records")
 
 pair_map = {
     "FY": "TY",
@@ -115,8 +124,11 @@ for classroom_name, bench_count in classroom_list:
         # Find student for bench position 1
         s1 = None
         for cl in ordered_classes:
-            if len(class_pools[cl]) > 0:
-                s1 = class_pools[cl].pop(0)
+            for branch in sorted(class_pools[cl].keys()):
+                if class_pools[cl][branch]:
+                    s1 = class_pools[cl][branch].pop(0)
+                    break
+            if s1:
                 break
         
         if s1 is None:
@@ -127,21 +139,30 @@ for classroom_name, bench_count in classroom_list:
         partner_class = pair_map.get(s1_class)
         s2 = None
         
-        if partner_class and len(class_pools.get(partner_class, [])) > 0:
-            s2 = class_pools[partner_class].pop(0)
+        if partner_class and class_pools.get(partner_class):
+            for branch in sorted(class_pools[partner_class].keys()):
+                if class_pools[partner_class][branch]:
+                    s2 = class_pools[partner_class][branch].pop(0)
+                    break
         else:
             # Fallback: find from any other class
             for fallback_cl in ordered_classes:
-                if fallback_cl != s1_class and len(class_pools.get(fallback_cl, [])) > 0:
-                    s2 = class_pools[fallback_cl].pop(0)
-                    break
+                if fallback_cl != s1_class:
+                    for branch in sorted(class_pools[fallback_cl].keys()):
+                        if class_pools[fallback_cl][branch]:
+                            s2 = class_pools[fallback_cl][branch].pop(0)
+                            break
+                    if s2:
+                        break
         
         benches.append({
             "Classroom": classroom_name,
             "Bench": bench_idx + 1,
-            "Student1": s1.get("Name", "(unknown)"),
+            "Student1": f"{s1.get('Branch', '')} {s1.get('ClassGroup', '')}-{s1.get('StudentID', '')}",
+            "Branch1": s1.get('Branch', ''),
             "Class1": s1_class,
-            "Student2": s2.get("Name", "(empty)") if s2 else "(empty)",
+            "Student2": f"{s2.get('Branch', '')} {s2.get('ClassGroup', '')}-{s2.get('StudentID', '')}" if s2 else "(empty)",
+            "Branch2": s2.get('Branch', '') if s2 else '',
             "Class2": s2.get("ClassGroup", "") if s2 else "",
         })
         
@@ -150,30 +171,44 @@ for classroom_name, bench_count in classroom_list:
 # If auto_assign, create overflow classrooms for remaining students
 if auto_assign:
     overflow_classroom_idx = 1
-    while any(len(class_pools[c]) > 0 for c in ordered_classes):
+    while any(any(class_pools[c][b] for b in class_pools[c]) for c in ordered_classes):
         # Find class with most remaining students
-        max_class = max(ordered_classes, key=lambda c: len(class_pools[c]))
-        if len(class_pools[max_class]) == 0:
+        max_class = max(ordered_classes, key=lambda c: sum(len(class_pools[c][b]) for b in class_pools[c]))
+        if sum(len(class_pools[max_class][b]) for b in class_pools[max_class]) == 0:
             break
         
-        s1 = class_pools[max_class].pop(0)
+        s1 = None
+        for branch in sorted(class_pools[max_class].keys()):
+            if class_pools[max_class][branch]:
+                s1 = class_pools[max_class][branch].pop(0)
+                break
+        
         partner_class = pair_map.get(s1.get("ClassGroup", ""))
         s2 = None
         
-        if partner_class and len(class_pools.get(partner_class, [])) > 0:
-            s2 = class_pools[partner_class].pop(0)
+        if partner_class and class_pools.get(partner_class):
+            for branch in sorted(class_pools[partner_class].keys()):
+                if class_pools[partner_class][branch]:
+                    s2 = class_pools[partner_class][branch].pop(0)
+                    break
         else:
             for fallback_cl in ordered_classes:
-                if fallback_cl != s1.get("ClassGroup", "") and len(class_pools.get(fallback_cl, [])) > 0:
-                    s2 = class_pools[fallback_cl].pop(0)
-                    break
+                if fallback_cl != s1.get("ClassGroup", ""):
+                    for branch in sorted(class_pools[fallback_cl].keys()):
+                        if class_pools[fallback_cl][branch]:
+                            s2 = class_pools[fallback_cl][branch].pop(0)
+                            break
+                    if s2:
+                        break
         
         benches.append({
             "Classroom": f"Overflow_{overflow_classroom_idx}",
             "Bench": len([b for b in benches if b["Classroom"] == f"Overflow_{overflow_classroom_idx}"]) + 1,
-            "Student1": s1.get("Name", "(unknown)"),
+            "Student1": f"{s1.get('Branch', '')} {s1.get('ClassGroup', '')}-{s1.get('StudentID', '')}",
+            "Branch1": s1.get('Branch', ''),
             "Class1": s1.get("ClassGroup", ""),
-            "Student2": s2.get("Name", "(empty)") if s2 else "(empty)",
+            "Student2": f"{s2.get('Branch', '')} {s2.get('ClassGroup', '')}-{s2.get('StudentID', '')}" if s2 else "(empty)",
+            "Branch2": s2.get('Branch', '') if s2 else '',
             "Class2": s2.get("ClassGroup", "") if s2 else "",
         })
         
@@ -184,7 +219,8 @@ if auto_assign:
 # Collect unassigned students
 unassigned_records = []
 for cl in ordered_classes:
-    unassigned_records.extend(class_pools.get(cl, []))
+    for branch in class_pools[cl]:
+        unassigned_records.extend(class_pools[cl][branch])
 
 seating_df = pd.DataFrame(benches)
 
@@ -194,12 +230,12 @@ st.subheader("Seating arrangement (by classroom)")
 classroom_groups = seating_df.groupby("Classroom")
 for classroom_name, group_df in classroom_groups:
     st.write(f"### {classroom_name}")
-    st.dataframe(group_df[["Bench", "Student1", "Class1", "Student2", "Class2"]])
+    st.dataframe(group_df[["Bench", "Student1", "Branch1", "Class1", "Student2", "Branch2", "Class2"]])
 
 if unassigned_records:
     unassigned_df = pd.DataFrame(unassigned_records)
     st.warning(f"{len(unassigned_df)} students remain unassigned. Enable auto-assign or add more classrooms.")
-    st.dataframe(unassigned_df[["StudentID", "Name", "ClassGroup"]])
+    st.dataframe(unassigned_df[["StudentID", "Name", "Branch", "ClassGroup"]])
 else:
     st.success("All students assigned to classrooms and benches.")
 
@@ -259,9 +295,9 @@ if Document is not None:
     
     for classroom_name, group_df in classroom_groups:
         doc.add_heading(f'Classroom: {classroom_name}', level=2)
-        table = doc.add_table(rows=1, cols=5)
+        table = doc.add_table(rows=1, cols=7)
         hdr_cells = table.rows[0].cells
-        headers = ["Bench", "Student 1", "Class 1", "Student 2", "Class 2"]
+        headers = ["Bench", "Student 1", "Branch 1", "Class 1", "Student 2", "Branch 2", "Class 2"]
         for i, h in enumerate(headers):
             hdr_cells[i].text = h
         
@@ -272,9 +308,11 @@ if Document is not None:
             cells = table.add_row().cells
             cells[0].text = str(row.Bench)
             cells[1].text = str(row.Student1)
-            cells[2].text = str(row.Class1)
-            cells[3].text = str(row.Student2)
-            cells[4].text = str(row.Class2)
+            cells[2].text = str(row.Branch1)
+            cells[3].text = str(row.Class1)
+            cells[4].text = str(row.Student2)
+            cells[5].text = str(row.Branch2)
+            cells[6].text = str(row.Class2)
             # Set row height for data rows
             table.rows[-1].height = Inches(0.4)
         
@@ -298,8 +336,8 @@ if FPDF is not None:
         pdf.ln(2)
         
         pdf.set_font('Arial', 'B', 10)
-        col_widths = [15, 55, 25, 55, 25]
-        headers = ["Bench", "Student1", "Class1", "Student2", "Class2"]
+        col_widths = [10, 30, 20, 15, 30, 20, 15]
+        headers = ["Bench", "Student1", "Branch1", "Class1", "Student2", "Branch2", "Class2"]
         for i, header in enumerate(headers):
             pdf.cell(col_widths[i], 10, header, border=1)  # Increased height for header
         pdf.ln()
@@ -308,9 +346,11 @@ if FPDF is not None:
         for _, row in group_df.iterrows():
             pdf.cell(col_widths[0], 10, str(row.Bench), border=1)  # Increased height for data
             pdf.cell(col_widths[1], 10, str(row.Student1), border=1)
-            pdf.cell(col_widths[2], 10, str(row.Class1), border=1)
-            pdf.cell(col_widths[3], 10, str(row.Student2), border=1)
-            pdf.cell(col_widths[4], 10, str(row.Class2), border=1)
+            pdf.cell(col_widths[2], 10, str(row.Branch1), border=1)
+            pdf.cell(col_widths[3], 10, str(row.Class1), border=1)
+            pdf.cell(col_widths[4], 10, str(row.Student2), border=1)
+            pdf.cell(col_widths[5], 10, str(row.Branch2), border=1)
+            pdf.cell(col_widths[6], 10, str(row.Class2), border=1)
             pdf.ln()
         
         pdf.ln(5)  # Space between classrooms
