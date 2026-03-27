@@ -363,6 +363,8 @@ if FPDF is not None:
             pdf.ln(5)
         
         pdf_bytes = pdf.output()
+        if isinstance(pdf_bytes, bytearray):
+            pdf_bytes = bytes(pdf_bytes)
         st.download_button("⬇️ Download arrangement as PDF", data=pdf_bytes, file_name="seating_arrangement.pdf", mime="application/pdf")
     except Exception as e:
         st.error(f"Error generating PDF: {e}")
